@@ -33,3 +33,4 @@ self.addEventListener("fetch", e => {
     )
   );
 });
+const CACHE = "mbta-live-v2"; // bump version from v1 -> v2

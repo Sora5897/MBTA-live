@@ -1,4 +1,4 @@
-// ====== MBTA Live Map with Auto Route List ======
+// ====== MBTA Live Map with Modes, Legend, and Alerts ======
 
 const apiKeyInput = document.getElementById("apiKey");
 const saveKeyBtn  = document.getElementById("saveKey");
@@ -9,6 +9,8 @@ const startBtn    = document.getElementById("startBtn");
 const stopBtn     = document.getElementById("stopBtn");
 const fitBtn      = document.getElementById("fitBtn");
 const statusEl    = document.getElementById("status");
+const alertsEl    = document.getElementById("alerts");
+const modeBoxes   = Array.from(document.querySelectorAll(".mode"));
 
 // restore saved key
 apiKeyInput.value = localStorage.getItem("mbta_api_key") || "";
@@ -38,16 +40,16 @@ function mkIcon(color="#0078ff") {
   });
 }
 
-// color by mode/route
+// color by route id
 function colorFor(routeId="") {
   const id = (routeId || "").toLowerCase();
-  if (id.startsWith("green")) return "#2ecc71";
+  if (id.startsWith("green") || id.includes("mattapan")) return "#2ecc71"; // light rail
   if (id.includes("red"))     return "#e74c3c";
   if (id.includes("orange"))  return "#e67e22";
   if (id.includes("blue"))    return "#3498db";
   if (id.startsWith("cr-"))   return "#8e44ad"; // commuter rail
   if (id.startsWith("ferry")) return "#16a085";
-  return "#555"; // buses/other
+  return "#555"; // bus/other
 }
 
 function headers() {
@@ -55,18 +57,23 @@ function headers() {
   return key ? { "x-api-key": key } : {};
 }
 
+function selectedRouteTypes(){
+  const vals = modeBoxes.filter(b => b.checked).map(b => b.value);
+  return vals; // strings of 0..4
+}
+
 // ---- Auto-load ALL MBTA routes into dropdown ----
 async function loadRoutes() {
   try {
     setStatus("Loading routes…");
     const url = new URL("https://api-v3.mbta.com/routes");
-    url.searchParams.set("page[limit]", "500");         // plenty
-    url.searchParams.set("sort", "type,short_name");    // nice order
+    url.searchParams.set("page[limit]", "500");
+    url.searchParams.set("sort", "type,short_name");
     const res = await fetch(url.toString(), { headers: headers() });
     const json = await res.json();
     const routes = json.data || [];
 
-    // group by GTFS type (MBTA: 0 light rail, 1 heavy rail, 2 commuter rail, 3 bus, 4 ferry)
+    // Group by GTFS type
     const groups = new Map([
       [0, { label: "Light Rail (Green/Mattapan)", items: [] }],
       [1, { label: "Heavy Rail (Red/Orange/Blue)", items: [] }],
@@ -76,16 +83,13 @@ async function loadRoutes() {
     ]);
 
     routes.forEach(r => {
-      const id = r.id; // e.g., "Green-B", "1", "CR-Fitchburg"
+      const id = r.id;
       const a  = r.attributes || {};
       const name = a.long_name || a.short_name || id;
       const type = a.type;
-      if (groups.has(type)) {
-        groups.get(type).items.push({ id, name });
-      }
+      if (groups.has(type)) groups.get(type).items.push({ id, name });
     });
 
-    // clear and repopulate <select>
     routeList.innerHTML = "";
     const blank = document.createElement("option");
     blank.value = ""; blank.textContent = "-- All Routes --";
@@ -103,7 +107,6 @@ async function loadRoutes() {
       });
       routeList.appendChild(og);
     }
-
     setStatus("Routes loaded.");
   } catch (e) {
     console.error(e);
@@ -117,9 +120,14 @@ routeList.addEventListener("change", () => {
 });
 
 // ---- Vehicle fetching ----
-async function fetchVehicles(route) {
+async function fetchVehicles(route, types) {
   const url = new URL("https://api-v3.mbta.com/vehicles");
-  if (route) url.searchParams.set("filter[route]", route);
+  if (route) {
+    url.searchParams.set("filter[route]", route);
+  } else if (types && types.length && types.length < 5) {
+    // Filter by selected GTFS route types if not all selected
+    url.searchParams.set("filter[route_type]", types.join(","));
+  }
   url.searchParams.set("include", "trip,route");
   url.searchParams.set("page[limit]", "200");
 
@@ -131,9 +139,10 @@ async function fetchVehicles(route) {
 
 async function refreshOnce() {
   const route = routeInput.value.trim();
-  setStatus(`Loading ${route || "all"}…`);
+  const types = selectedRouteTypes();
+  setStatus(`Loading ${route || (types.length && types.length<5 ? `types ${types.join(",")}` : "all")}…`);
   try {
-    const vehicles = await fetchVehicles(route);
+    const vehicles = await fetchVehicles(route, types);
     let bounds = [];
 
     vehicles.forEach(v => {
@@ -144,7 +153,6 @@ async function refreshOnce() {
       const latlng = [a.latitude, a.longitude];
       bounds.push(latlng);
 
-      // route id for color
       const routeRel = (v.relationships && v.relationships.route && v.relationships.route.data && v.relationships.route.data.id) || route || "";
       const color = colorFor(routeRel);
 
@@ -180,11 +188,49 @@ async function refreshOnce() {
   }
 }
 
+// ---- Alerts ----
+async function fetchAlerts(route, types){
+  const url = new URL("https://api-v3.mbta.com/alerts");
+  url.searchParams.set("page[limit]","50");
+  url.searchParams.set("sort","-updated_at");
+  // filter by route or types (if user limited modes)
+  if (route) {
+    url.searchParams.set("filter[route]", route);
+  } else if (types && types.length && types.length < 5) {
+    url.searchParams.set("filter[route_type]", types.join(","));
+  }
+  const res = await fetch(url.toString(), { headers: headers() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  return json.data || [];
+}
+
+async function refreshAlerts(){
+  const route = routeInput.value.trim();
+  const types = selectedRouteTypes();
+  try{
+    const items = await fetchAlerts(route, types);
+    if (!items.length){ alertsEl.innerHTML = `<div class="alert">No active alerts.</div>`; return; }
+    alertsEl.innerHTML = items.slice(0,12).map(a=>{
+      const at = a.attributes || {};
+      const h  = (at.header || "Service alert").replace(/\n/g," ");
+      const desc = (at.short_header || at.description || "").toString().slice(0,200);
+      const sev = at.severity != null ? `Severity ${at.severity}` : "";
+      const when = at.updated_at ? new Date(at.updated_at).toLocaleString() : "";
+      return `<div class="alert"><strong>${h}</strong><small>${sev}${sev&&when?" • ":""}${when}</small>${desc ? `<div>${desc}</div>`:""}</div>`;
+    }).join("");
+  }catch(e){
+    console.error(e);
+    alertsEl.innerHTML = `<div class="alert">Failed to load alerts.</div>`;
+  }
+}
+
+// ---- Controls ----
 startBtn.addEventListener("click", async () => {
   const ms = parseInt(refreshSel.value, 10) || 10000;
-  await refreshOnce();
+  await Promise.all([refreshOnce(), refreshAlerts()]);
   if (timer) clearInterval(timer);
-  timer = setInterval(refreshOnce, ms);
+  timer = setInterval(()=>{ refreshOnce(); refreshAlerts(); }, ms);
   toast(`Auto-refresh every ${ms/1000}s`);
 });
 
@@ -199,9 +245,14 @@ fitBtn.addEventListener("click", async () => {
   if (bounds.length) map.fitBounds(bounds, { padding: [30,30] });
 });
 
+// change filters -> refresh once
+modeBoxes.forEach(b => b.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); }));
+routeInput.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); });
+routeList.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); });
+
 function setStatus(msg){ statusEl.textContent = msg; }
 function toast(msg){ setStatus(msg); }
 
-// load the routes on page load and set a practical default
+// init
 routeInput.value ||= "1";
-loadRoutes();
+loadRoutes().then(()=>{ refreshOnce(); refreshAlerts(); });

@@ -1,9 +1,9 @@
-// ====== MBTA Live Map ======
+// ====== MBTA Live Map with Auto Route List ======
 
 const apiKeyInput = document.getElementById("apiKey");
 const saveKeyBtn  = document.getElementById("saveKey");
 const routeInput  = document.getElementById("routeInput");
-const presetsSel  = document.getElementById("presets");
+const routeList   = document.getElementById("routeList");
 const refreshSel  = document.getElementById("refreshMs");
 const startBtn    = document.getElementById("startBtn");
 const stopBtn     = document.getElementById("stopBtn");
@@ -17,34 +17,28 @@ saveKeyBtn.addEventListener("click", () => {
   toast("API key saved locally.");
 });
 
-// preset picker -> copies into route field
-presetsSel.addEventListener("change", () => {
-  if (presetsSel.value) routeInput.value = presetsSel.value;
-});
-
 // ---- Leaflet map ----
 const map = L.map("map").setView([42.3601, -71.0589], 12); // Boston
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap",
+  maxZoom: 19, attribution: "&copy; OpenStreetMap",
 }).addTo(map);
 
 // marker cache by vehicle id
 const markers = new Map();
 let timer = null;
 
-// basic colored circle for vehicles
+// small colored circle for vehicles
 function mkIcon(color="#0078ff") {
   return L.divIcon({
     className: "veh",
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};
-            border:2px solid white; box-shadow:0 0 2px rgba(0,0,0,.5)"></div>`,
-    iconSize: [14,14],
-    iconAnchor: [7,7]
+    html: `<div style="width:14px;height:14px;border-radius:50%;
+            background:${color};border:2px solid white;
+            box-shadow:0 0 2px rgba(0,0,0,.5)"></div>`,
+    iconSize: [14,14], iconAnchor: [7,7]
   });
 }
 
-// choose color by mode from MBTA route id
+// color by mode/route
 function colorFor(routeId="") {
   const id = (routeId || "").toLowerCase();
   if (id.startsWith("green")) return "#2ecc71";
@@ -52,7 +46,8 @@ function colorFor(routeId="") {
   if (id.includes("orange"))  return "#e67e22";
   if (id.includes("blue"))    return "#3498db";
   if (id.startsWith("cr-"))   return "#8e44ad"; // commuter rail
-  return "#555"; // bus/other
+  if (id.startsWith("ferry")) return "#16a085";
+  return "#555"; // buses/other
 }
 
 function headers() {
@@ -60,6 +55,68 @@ function headers() {
   return key ? { "x-api-key": key } : {};
 }
 
+// ---- Auto-load ALL MBTA routes into dropdown ----
+async function loadRoutes() {
+  try {
+    setStatus("Loading routes…");
+    const url = new URL("https://api-v3.mbta.com/routes");
+    url.searchParams.set("page[limit]", "500");         // plenty
+    url.searchParams.set("sort", "type,short_name");    // nice order
+    const res = await fetch(url.toString(), { headers: headers() });
+    const json = await res.json();
+    const routes = json.data || [];
+
+    // group by GTFS type (MBTA: 0 light rail, 1 heavy rail, 2 commuter rail, 3 bus, 4 ferry)
+    const groups = new Map([
+      [0, { label: "Light Rail (Green/Mattapan)", items: [] }],
+      [1, { label: "Heavy Rail (Red/Orange/Blue)", items: [] }],
+      [3, { label: "Bus", items: [] }],
+      [2, { label: "Commuter Rail", items: [] }],
+      [4, { label: "Ferry", items: [] }],
+    ]);
+
+    routes.forEach(r => {
+      const id = r.id; // e.g., "Green-B", "1", "CR-Fitchburg"
+      const a  = r.attributes || {};
+      const name = a.long_name || a.short_name || id;
+      const type = a.type;
+      if (groups.has(type)) {
+        groups.get(type).items.push({ id, name });
+      }
+    });
+
+    // clear and repopulate <select>
+    routeList.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = ""; blank.textContent = "-- All Routes --";
+    routeList.appendChild(blank);
+
+    for (const [type, group] of groups.entries()) {
+      if (!group.items.length) continue;
+      const og = document.createElement("optgroup");
+      og.label = group.label;
+      group.items.forEach(({ id, name }) => {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = `${id} -- ${name}`;
+        og.appendChild(opt);
+      });
+      routeList.appendChild(og);
+    }
+
+    setStatus("Routes loaded.");
+  } catch (e) {
+    console.error(e);
+    setStatus("Failed to load routes (try saving API key).");
+  }
+}
+
+// when user picks from dropdown, copy to text field
+routeList.addEventListener("change", () => {
+  routeInput.value = routeList.value;
+});
+
+// ---- Vehicle fetching ----
 async function fetchVehicles(route) {
   const url = new URL("https://api-v3.mbta.com/vehicles");
   if (route) url.searchParams.set("filter[route]", route);
@@ -69,7 +126,7 @@ async function fetchVehicles(route) {
   const res = await fetch(url.toString(), { headers: headers() });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  return data.data; // array of vehicles
+  return data.data; // array
 }
 
 async function refreshOnce() {
@@ -79,7 +136,6 @@ async function refreshOnce() {
     const vehicles = await fetchVehicles(route);
     let bounds = [];
 
-    // update/create markers
     vehicles.forEach(v => {
       const id = v.id;
       const a  = v.attributes || {};
@@ -88,6 +144,7 @@ async function refreshOnce() {
       const latlng = [a.latitude, a.longitude];
       bounds.push(latlng);
 
+      // route id for color
       const routeRel = (v.relationships && v.relationships.route && v.relationships.route.data && v.relationships.route.data.id) || route || "";
       const color = colorFor(routeRel);
 
@@ -108,7 +165,7 @@ async function refreshOnce() {
       }
     });
 
-    // remove markers that disappeared
+    // remove stale markers
     for (const [id, m] of [...markers.entries()]) {
       const still = vehicles.find(v => v.id === id);
       if (!still) { map.removeLayer(m); markers.delete(id); }
@@ -145,5 +202,6 @@ fitBtn.addEventListener("click", async () => {
 function setStatus(msg){ statusEl.textContent = msg; }
 function toast(msg){ setStatus(msg); }
 
-// optional: start with a sensible default route
+// load the routes on page load and set a practical default
 routeInput.value ||= "1";
+loadRoutes();

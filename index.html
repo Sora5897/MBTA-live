@@ -12,16 +12,15 @@
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin=""
   />
-
-  <link rel="stylesheet" href="styles.css"/>
   <style>
-    body{font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0}
-    header{padding:12px 16px; border-bottom:1px solid #eee}
-    h1{margin:0; color:#800000; font-size:20px}
-    .controls{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:0}
+    header{padding:12px 16px;border-bottom:1px solid #eee}
+    h1{margin:0;color:#800000;font-size:20px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .controls input,.controls select,.controls button{padding:8px}
-    #map{height:75vh; width:100%;}
-    #status{padding:8px 16px; font-size:13px; color:#555}
+    #map{height:75vh;width:100%}
+    #status{padding:8px 16px;font-size:13px;color:#555}
+    optgroup[label]{font-weight:bold}
   </style>
 </head>
 <body>
@@ -31,21 +30,12 @@
       <input id="apiKey" type="text" placeholder="MBTA API Key (optional)">
       <button id="saveKey">Save Key</button>
 
+      <!-- You can still type a route manually if you want -->
       <input id="routeInput" type="text" size="12" placeholder="Route (e.g. 1, Red, Green-B)">
-      <select id="presets">
-        <option value="">-- presets --</option>
-        <option>1</option>
-        <option>22</option>
-        <option>66</option>
-        <option>Red</option>
-        <option>Orange</option>
-        <option>Blue</option>
-        <option>Green-B</option>
-        <option>Green-C</option>
-        <option>Green-D</option>
-        <option>Green-E</option>
-        <option>Mattapan</option>
-        <option>CR-Fitchburg</option>
+
+      <!-- Auto-populated list of all MBTA routes -->
+      <select id="routeList">
+        <option value="">Loading routes…</option>
       </select>
 
       <select id="refreshMs">

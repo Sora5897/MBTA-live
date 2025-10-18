@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>MBTA Live Map</title>
 
-  <!-- PWA manifest & SW (you already added these) -->
+  <!-- PWA (already in your repo) -->
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -35,7 +35,7 @@
     h1{margin:0;color:var(--maroon);font-size:20px}
     .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .controls input,.controls select,.controls button,.controls label{padding:8px}
-    #layout{display:grid;grid-template-columns: 1fr 340px; gap:0}
+    #layout{display:grid;grid-template-columns: 1fr 360px; gap:0}
     #map{height:78vh;width:100%}
     #status{padding:8px 16px;font-size:13px;color:#555;border-top:1px solid #eee}
     aside{border-left:1px solid #eee; display:flex; flex-direction:column; height:calc(78vh); overflow:auto}
@@ -49,9 +49,11 @@
     .dot.bus{background:var(--bus)}
     .modes{display:flex;flex-wrap:wrap;gap:10px}
     .modes label{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid #ddd;border-radius:8px}
-    .alert{border:1px solid #eee;border-left:4px solid var(--navy);padding:8px 10px;border-radius:6px;margin:8px 0;background:#fafafa}
-    .alert small{display:block;color:var(--muted)}
-    .inline{display:flex;align-items:center;gap:6px}
+    .inline{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    #routeList{min-width:220px}
+    #multiRoutes{min-width:240px}
+    .help{font-size:12px;color:var(--muted)}
+    .stop-result{padding:6px 8px;border:1px solid #eee;border-radius:6px;margin:6px 0;background:#fafafa}
     @media (max-width: 900px){
       #layout{grid-template-columns:1fr}
       aside{order:-1;height:auto}
@@ -63,27 +65,35 @@
   <header>
     <h1>MBTA Live Map</h1>
     <div class="controls">
-      <input id="apiKey" type="text" placeholder="MBTA API Key (optional)">
+      <input id="apiKey" type="text" placeholder="MBTA API Key (optional)" title="Paste your MBTA v3 API key and Save once">
       <button id="saveKey">Save Key</button>
 
       <!-- manual text route (optional) -->
-      <input id="routeInput" type="text" size="12" placeholder="Route (e.g. 1, Red, Green-B)">
+      <input id="routeInput" type="text" size="12" placeholder="Route (e.g. 1 or Red)" title="Optional: type a single route id">
 
-      <!-- auto-populated list of all MBTA routes -->
-      <select id="routeList">
+      <!-- auto routes (single) -->
+      <select id="routeList" title="Pick one route, or use the multi-select on the right">
         <option value="">-- All Routes --</option>
       </select>
 
-      <select id="refreshMs">
+      <!-- NEW: multi-route select -->
+      <select id="multiRoutes" multiple size="4" title="Select multiple routes (Cmd/Ctrl or tap to pick). Leave empty for all.">
+        <option value="">(loading routes…)</option>
+      </select>
+
+      <select id="refreshMs" title="How often the map refreshes">
         <option value="5000">Refresh: 5s</option>
         <option value="10000" selected>Refresh: 10s</option>
         <option value="15000">Refresh: 15s</option>
         <option value="30000">Refresh: 30s</option>
       </select>
 
-      <button id="startBtn">Start</button>
-      <button id="stopBtn">Stop</button>
-      <button id="fitBtn">Fit to Vehicles</button>
+      <button id="startBtn" title="Start auto-refresh">Start</button>
+      <button id="stopBtn" title="Stop auto-refresh">Stop</button>
+      <button id="fitBtn" title="Zoom to show all visible vehicles">Fit to Vehicles</button>
+    </div>
+    <div class="controls help">
+      Tip: Use the multi-select to show multiple routes at once (e.g., Red + Orange). Leave both route boxes blank to show everything.
     </div>
   </header>
 
@@ -94,11 +104,21 @@
       <div class="panel">
         <h3 class="inline">Mode Filters</h3>
         <div class="modes">
-          <label><input type="checkbox" class="mode" value="0" checked> Light Rail (Green/Mattapan)</label>
-          <label><input type="checkbox" class="mode" value="1" checked> Heavy Rail (Red/Orange/Blue)</label>
-          <label><input type="checkbox" class="mode" value="3" checked> Bus</label>
-          <label><input type="checkbox" class="mode" value="2" checked> Commuter Rail</label>
-          <label><input type="checkbox" class="mode" value="4" checked> Ferry</label>
+          <label title="Green Line branches & Mattapan (type 0)">
+            <input type="checkbox" class="mode" value="0" checked> Light Rail
+          </label>
+          <label title="Red / Orange / Blue (type 1)">
+            <input type="checkbox" class="mode" value="1" checked> Heavy Rail
+          </label>
+          <label title="All MBTA buses (type 3)">
+            <input type="checkbox" class="mode" value="3" checked> Bus
+          </label>
+          <label title="Commuter Rail (type 2)">
+            <input type="checkbox" class="mode" value="2" checked> Commuter Rail
+          </label>
+          <label title="Ferry services (type 4)">
+            <input type="checkbox" class="mode" value="4" checked> Ferry
+          </label>
         </div>
       </div>
 
@@ -111,6 +131,18 @@
         <div class="legend-item"><span class="dot purple"></span> Commuter Rail</div>
         <div class="legend-item"><span class="dot teal"></span> Ferry</div>
         <div class="legend-item"><span class="dot bus"></span> Bus</div>
+      </div>
+
+      <div class="panel">
+        <h3>Stop Search</h3>
+        <div class="inline" style="gap:8px; flex-wrap:wrap">
+          <input id="stopQuery" type="text" placeholder="Search stops (e.g., Park St)" title="Search by stop name"/>
+          <button id="searchStops">Search</button>
+          <label title="Toggle displaying stop markers on the map">
+            <input type="checkbox" id="showStops" checked> Show markers
+          </label>
+        </div>
+        <div id="stopResults" class="help" style="margin-top:8px;">Type a stop name and click Search.</div>
       </div>
 
       <div class="panel">

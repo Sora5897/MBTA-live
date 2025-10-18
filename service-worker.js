@@ -34,3 +34,4 @@ self.addEventListener("fetch", e => {
   );
 });
 const CACHE = "mbta-live-v2"; // bump version from v1 -> v2
+const CACHE = "mbta-live-v3"; // was v2

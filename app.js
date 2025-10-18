@@ -1,9 +1,10 @@
-// ====== MBTA Live Map with Modes, Legend, and Alerts ======
+// ====== MBTA Live Map: tooltips, multi-route, stop search ======
 
 const apiKeyInput = document.getElementById("apiKey");
 const saveKeyBtn  = document.getElementById("saveKey");
 const routeInput  = document.getElementById("routeInput");
 const routeList   = document.getElementById("routeList");
+const multiRoutes = document.getElementById("multiRoutes");
 const refreshSel  = document.getElementById("refreshMs");
 const startBtn    = document.getElementById("startBtn");
 const stopBtn     = document.getElementById("stopBtn");
@@ -12,6 +13,11 @@ const statusEl    = document.getElementById("status");
 const alertsEl    = document.getElementById("alerts");
 const modeBoxes   = Array.from(document.querySelectorAll(".mode"));
 
+const stopQuery   = document.getElementById("stopQuery");
+const searchStopsBtn = document.getElementById("searchStops");
+const stopResults = document.getElementById("stopResults");
+const showStopsChk = document.getElementById("showStops");
+
 // restore saved key
 apiKeyInput.value = localStorage.getItem("mbta_api_key") || "";
 saveKeyBtn.addEventListener("click", () => {
@@ -19,17 +25,18 @@ saveKeyBtn.addEventListener("click", () => {
   toast("API key saved locally.");
 });
 
-// ---- Leaflet map ----
-const map = L.map("map").setView([42.3601, -71.0589], 12); // Boston
+// map
+const map = L.map("map").setView([42.3601, -71.0589], 12);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "&copy; OpenStreetMap",
 }).addTo(map);
 
-// marker cache by vehicle id
-const markers = new Map();
+// markers
+const markers = new Map();           // vehicle markers
+const stopLayer = L.layerGroup().addTo(map); // stop markers
 let timer = null;
 
-// small colored circle for vehicles
+// icons
 function mkIcon(color="#0078ff") {
   return L.divIcon({
     className: "veh",
@@ -39,17 +46,23 @@ function mkIcon(color="#0078ff") {
     iconSize: [14,14], iconAnchor: [7,7]
   });
 }
+function mkStopIcon() {
+  return L.divIcon({
+    className: "stp",
+    html: `<div style="width:10px;height:10px;border-radius:2px;background:#111;border:2px solid #fff;box-shadow:0 0 2px rgba(0,0,0,.5)"></div>`,
+    iconSize: [12,12], iconAnchor: [6,6]
+  });
+}
 
-// color by route id
 function colorFor(routeId="") {
   const id = (routeId || "").toLowerCase();
-  if (id.startsWith("green") || id.includes("mattapan")) return "#2ecc71"; // light rail
+  if (id.startsWith("green") || id.includes("mattapan")) return "#2ecc71";
   if (id.includes("red"))     return "#e74c3c";
   if (id.includes("orange"))  return "#e67e22";
   if (id.includes("blue"))    return "#3498db";
-  if (id.startsWith("cr-"))   return "#8e44ad"; // commuter rail
+  if (id.startsWith("cr-"))   return "#8e44ad";
   if (id.startsWith("ferry")) return "#16a085";
-  return "#555"; // bus/other
+  return "#555";
 }
 
 function headers() {
@@ -57,12 +70,19 @@ function headers() {
   return key ? { "x-api-key": key } : {};
 }
 
-function selectedRouteTypes(){
-  const vals = modeBoxes.filter(b => b.checked).map(b => b.value);
-  return vals; // strings of 0..4
+function selectedModeTypes(){
+  return modeBoxes.filter(b => b.checked).map(b => b.value); // strings "0".."4"
 }
 
-// ---- Auto-load ALL MBTA routes into dropdown ----
+function selectedRoutesArray() {
+  const typed = routeInput.value.trim();
+  const fromText = typed ? [typed] : [];
+  const fromMulti = Array.from(multiRoutes.selectedOptions).map(o => o.value).filter(Boolean);
+  const all = [...new Set([...fromText, ...fromMulti])];
+  return all;
+}
+
+// ---- routes ----
 async function loadRoutes() {
   try {
     setStatus("Loading routes…");
@@ -73,7 +93,6 @@ async function loadRoutes() {
     const json = await res.json();
     const routes = json.data || [];
 
-    // Group by GTFS type
     const groups = new Map([
       [0, { label: "Light Rail (Green/Mattapan)", items: [] }],
       [1, { label: "Heavy Rail (Red/Orange/Blue)", items: [] }],
@@ -90,23 +109,41 @@ async function loadRoutes() {
       if (groups.has(type)) groups.get(type).items.push({ id, name });
     });
 
+    // single select
     routeList.innerHTML = "";
     const blank = document.createElement("option");
     blank.value = ""; blank.textContent = "-- All Routes --";
     routeList.appendChild(blank);
 
-    for (const [type, group] of groups.entries()) {
+    // multi select
+    multiRoutes.innerHTML = "";
+
+    for (const [type, group] of groups.entries()){
       if (!group.items.length) continue;
+
+      // single-select group
       const og = document.createElement("optgroup");
       og.label = group.label;
       group.items.forEach(({ id, name }) => {
         const opt = document.createElement("option");
-        opt.value = id;
-        opt.textContent = `${id} -- ${name}`;
+        opt.value = id; opt.textContent = `${id} -- ${name}`;
         og.appendChild(opt);
       });
       routeList.appendChild(og);
+
+      // multi-select options (flat is easier to tap)
+      const labelOpt = document.createElement("option");
+      labelOpt.disabled = true;
+      labelOpt.textContent = `-- ${group.label} --`;
+      multiRoutes.appendChild(labelOpt);
+
+      group.items.forEach(({ id, name }) => {
+        const opt = document.createElement("option");
+        opt.value = id; opt.textContent = `${id} -- ${name}`;
+        multiRoutes.appendChild(opt);
+      });
     }
+
     setStatus("Routes loaded.");
   } catch (e) {
     console.error(e);
@@ -114,35 +151,35 @@ async function loadRoutes() {
   }
 }
 
-// when user picks from dropdown, copy to text field
 routeList.addEventListener("change", () => {
   routeInput.value = routeList.value;
+  refreshAll();
 });
+multiRoutes.addEventListener("change", refreshAll);
 
-// ---- Vehicle fetching ----
-async function fetchVehicles(route, types) {
+// ---- vehicles ----
+async function fetchVehicles(routeIds, types) {
   const url = new URL("https://api-v3.mbta.com/vehicles");
-  if (route) {
-    url.searchParams.set("filter[route]", route);
+  if (routeIds && routeIds.length){
+    url.searchParams.set("filter[route]", routeIds.join(","));
   } else if (types && types.length && types.length < 5) {
-    // Filter by selected GTFS route types if not all selected
     url.searchParams.set("filter[route_type]", types.join(","));
   }
   url.searchParams.set("include", "trip,route");
   url.searchParams.set("page[limit]", "200");
-
   const res = await fetch(url.toString(), { headers: headers() });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  return data.data; // array
+  return data.data || [];
 }
 
 async function refreshOnce() {
-  const route = routeInput.value.trim();
-  const types = selectedRouteTypes();
-  setStatus(`Loading ${route || (types.length && types.length<5 ? `types ${types.join(",")}` : "all")}…`);
+  const routeIds = selectedRoutesArray();
+  const types = selectedModeTypes();
+  const label = routeIds.length ? routeIds.join(", ") : (types.length && types.length<5 ? `types ${types.join(",")}` : "all");
+  setStatus(`Loading ${label}…`);
   try {
-    const vehicles = await fetchVehicles(route, types);
+    const vehicles = await fetchVehicles(routeIds, types);
     let bounds = [];
 
     vehicles.forEach(v => {
@@ -153,12 +190,12 @@ async function refreshOnce() {
       const latlng = [a.latitude, a.longitude];
       bounds.push(latlng);
 
-      const routeRel = (v.relationships && v.relationships.route && v.relationships.route.data && v.relationships.route.data.id) || route || "";
+      const routeRel = (v.relationships && v.relationships.route && v.relationships.route.data && v.relationships.route.data.id) || "";
       const color = colorFor(routeRel);
 
       const text = `
         <b>Vehicle:</b> ${id}<br/>
-        <b>Route:</b> ${routeRel}<br/>
+        <b>Route:</b> ${routeRel || "--"}<br/>
         <b>Status:</b> ${a.current_status || "--"}<br/>
         <b>Speed:</b> ${a.speed != null ? a.speed.toFixed(1) + " m/s" : "--"}<br/>
         <b>Updated:</b> ${a.updated_at || "--"}
@@ -179,7 +216,7 @@ async function refreshOnce() {
       if (!still) { map.removeLayer(m); markers.delete(id); }
     }
 
-    setStatus(`Showing ${vehicles.length} vehicles${route ? " on " + route : ""}.`);
+    setStatus(`Showing ${vehicles.length} vehicles (${label}).`);
     return bounds;
   } catch (err) {
     setStatus(`Error: ${err.message}`);
@@ -188,14 +225,13 @@ async function refreshOnce() {
   }
 }
 
-// ---- Alerts ----
-async function fetchAlerts(route, types){
+// ---- alerts ----
+async function fetchAlerts(routeIds, types){
   const url = new URL("https://api-v3.mbta.com/alerts");
   url.searchParams.set("page[limit]","50");
   url.searchParams.set("sort","-updated_at");
-  // filter by route or types (if user limited modes)
-  if (route) {
-    url.searchParams.set("filter[route]", route);
+  if (routeIds && routeIds.length) {
+    url.searchParams.set("filter[route]", routeIds.join(","));
   } else if (types && types.length && types.length < 5) {
     url.searchParams.set("filter[route_type]", types.join(","));
   }
@@ -206,53 +242,98 @@ async function fetchAlerts(route, types){
 }
 
 async function refreshAlerts(){
-  const route = routeInput.value.trim();
-  const types = selectedRouteTypes();
+  const routeIds = selectedRoutesArray();
+  const types = selectedModeTypes();
   try{
-    const items = await fetchAlerts(route, types);
-    if (!items.length){ alertsEl.innerHTML = `<div class="alert">No active alerts.</div>`; return; }
+    const items = await fetchAlerts(routeIds, types);
+    if (!items.length){ alertsEl.innerHTML = `<div class="stop-result">No active alerts.</div>`; return; }
     alertsEl.innerHTML = items.slice(0,12).map(a=>{
       const at = a.attributes || {};
       const h  = (at.header || "Service alert").replace(/\n/g," ");
       const desc = (at.short_header || at.description || "").toString().slice(0,200);
       const sev = at.severity != null ? `Severity ${at.severity}` : "";
       const when = at.updated_at ? new Date(at.updated_at).toLocaleString() : "";
-      return `<div class="alert"><strong>${h}</strong><small>${sev}${sev&&when?" • ":""}${when}</small>${desc ? `<div>${desc}</div>`:""}</div>`;
+      return `<div class="stop-result"><strong>${h}</strong><br/><small>${sev}${sev&&when?" • ":""}${when}</small>${desc ? `<div>${desc}</div>`:""}</div>`;
     }).join("");
   }catch(e){
     console.error(e);
-    alertsEl.innerHTML = `<div class="alert">Failed to load alerts.</div>`;
+    alertsEl.innerHTML = `<div class="stop-result">Failed to load alerts.</div>`;
   }
 }
 
-// ---- Controls ----
+// ---- stop search ----
+async function searchStops(){
+  const q = stopQuery.value.trim();
+  const routeIds = selectedRoutesArray();
+  if (!q){ stopResults.textContent = "Type a stop name (e.g., Park St)."; return; }
+
+  const url = new URL("https://api-v3.mbta.com/stops");
+  url.searchParams.set("page[limit]","50");
+  url.searchParams.set("filter[search]", q);
+  if (routeIds.length) url.searchParams.set("filter[route]", routeIds.join(","));
+
+  try{
+    const res = await fetch(url.toString(), { headers: headers() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    const stops = json.data || [];
+
+    // draw markers
+    stopLayer.clearLayers();
+    if (showStopsChk.checked){
+      stops.forEach(s=>{
+        const a = s.attributes || {};
+        if (a.latitude == null || a.longitude == null) return;
+        const m = L.marker([a.latitude, a.longitude], { icon: mkStopIcon(), title: a.name || s.id }).addTo(stopLayer);
+        m.bindPopup(`<b>${a.name || s.id}</b><br/>${s.id}`);
+      });
+    }
+
+    if (!stops.length){
+      stopResults.textContent = "No stops found.";
+    } else {
+      stopResults.innerHTML = stops.slice(0,10).map(s=>{
+        const a = s.attributes || {};
+        return `<div class="stop-result"><strong>${a.name || s.id}</strong><br/><small>${a.address || ""}</small></div>`;
+      }).join("");
+    }
+  }catch(e){
+    console.error(e);
+    stopResults.textContent = "Failed to search stops.";
+  }
+}
+
+searchStopsBtn.addEventListener("click", searchStops);
+showStopsChk.addEventListener("change", ()=>{ if (!showStopsChk.checked) stopLayer.clearLayers(); });
+
+// ---- controls ----
+async function refreshAll(){
+  await Promise.all([refreshOnce(), refreshAlerts()]);
+}
+
 startBtn.addEventListener("click", async () => {
   const ms = parseInt(refreshSel.value, 10) || 10000;
-  await Promise.all([refreshOnce(), refreshAlerts()]);
+  await refreshAll();
   if (timer) clearInterval(timer);
-  timer = setInterval(()=>{ refreshOnce(); refreshAlerts(); }, ms);
+  timer = setInterval(refreshAll, ms);
   toast(`Auto-refresh every ${ms/1000}s`);
 });
-
 stopBtn.addEventListener("click", () => {
   if (timer) clearInterval(timer);
   timer = null;
   setStatus("Auto-refresh stopped.");
 });
-
 fitBtn.addEventListener("click", async () => {
   const bounds = await refreshOnce();
   if (bounds.length) map.fitBounds(bounds, { padding: [30,30] });
 });
 
-// change filters -> refresh once
-modeBoxes.forEach(b => b.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); }));
-routeInput.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); });
-routeList.addEventListener("change", ()=>{ refreshOnce(); refreshAlerts(); });
+modeBoxes.forEach(b => b.addEventListener("change", refreshAll));
+routeInput.addEventListener("change", refreshAll);
+
+// init
+routeInput.value ||= "";
+loadRoutes().then(refreshAll);
 
 function setStatus(msg){ statusEl.textContent = msg; }
 function toast(msg){ setStatus(msg); }
-
-// init
-routeInput.value ||= "1";
-loadRoutes().then(()=>{ refreshOnce(); refreshAlerts(); });
